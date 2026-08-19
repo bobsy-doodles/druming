@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Enhanced Drum Notation Editor</title>
+<style>
+  :root{
+    --bg: #17181a;
+    --paper: #efe9db;
+    --ink: #2a2621;
+    --muted: #948f84;
+    --brass: #c9a04e;
+    --radius-md: 10px;
+    --font-mono: 'IBM Plex Mono', monospace;
+  }
+  * { box-sizing: border-box; margin:0; padding:0; }
+  body {
+    background: var(--bg);
+    font-family: var(--font-mono);
+    color: var(--ink);
+    display: flex; justify-content: center; min-height: 100vh;
+    padding: 20px;
+  }
+  .stage {
+    max-width: 1200px; width: 100%;
+  }
+  header {
+    text-align: center; margin-bottom: 20px;
+  }
+  h1 {
+    font-size: 2em; margin-bottom: 10px;
+  }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; justify-content: center;
+  }
+  button {
+    background: transparent; border: 1px solid var(--brass); border-radius: var(--radius-md);
+    padding: 8px 12px; cursor:pointer; transition: background 0.2s;
+  }
+  button:hover { background: rgba(201,160,78,0.2); }
+  #grid-toggle { margin-left: 10px; }
+
+  .paper-container {
+    position: relative; background: var(--paper); padding: 20px; border-radius: var(--radius-md);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+  }
+  #staffSVG {
+    width: 100%; height: auto; display: block; cursor: grab;
+  }
+  /* Note styles */
+  .note {
+    cursor: grab; fill: black; stroke: #555; stroke-width: 1;
+  }
+  .note.dragging { opacity: 0.5; }
+  .grid-line {
+    stroke: rgba(42, 38, 33, 0.2); stroke-width: 0.5;
+  }
+  #undoBtn { margin-left: 10px; }
+</style>
+</head>
+<body>
+<div class="stage">
+<header>
+  <h1>Enhanced Drum Notation</h1>
+  <div class="controls">
+    <button id="addSnare">Add Snare Lane</button>
+    <button id="addKick">Add Kick Lane</button>
+    <button id="clear">Clear</button>
+    <button id="undoBtn">Undo</button>
+    <button id="grid-toggle">Toggle Grid</button>
+  </div>
+</header>
+
+<div class="paper-container">
+  <svg id="staffSVG" viewBox="0 0 1200 300" aria-label="Drum staff" role="img"></svg>
+</div>
+</div>
+
+<script>
+const svg = document.getElementById('staffSVG');
+
+const staffConfig = {
+  staffLines: 5,
+  lineSpacing: 20,
+  startX: 100,
+  startY: 50,
+  totalMeasures: 8,
+  measureWidth: 100,
+  subdivisions: 16,
+  stepWidth: 100/16,
+  totalWidth: 8 * 100,
+};
+let lanes = [];
+let notes = [];
+let history = [];
+let showGrid = true;
+
+// Preload sample sounds
+const samples = {
+  snare: new Audio('https://cdn.jsdelivr.net/gh/Skullawoo/drum-samples@main/snare.wav'),
+  kick: new Audio('https://cdn.jsdelivr.net/gh/Skullawoo/drum-samples@main/kick.wav')
+};
+// Clone sample buffer for better control
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function loadSample(audio) {
+  return fetch(audio.src)
+    .then(res => res.arrayBuffer())
+    .then(buf => audioCtx.decodeAudioData(buf));
+}
+Promise.all(Object.values(samples).map(s => loadSample(s))).then(decoded => {
+  Object.keys(samples).forEach((key, i) => { samples[key] = decoded[i]; });
+});
+
+// Draw staff lines
+function drawStaff() {
+  for (let i=0; i<staffConfig.staffLines; i++) {
+    svg.appendChild(svgLine(staffConfig.startX, staffConfig.startY + i*staffConfig.lineSpacing, staffConfig.startX + staffConfig.totalWidth, staffConfig.startY + i*staffConfig.lineSpacing));
+  }
+  // Measure lines
+  for(let m=0; m<=staffConfig.totalMeasures; m++){
+    const x = staffConfig.startX + m*staffConfig.measureWidth;
+    svg.appendChild(svgLine(x, staffConfig.startY, x, staffConfig.startY + (staffConfig.staffLines-1)*staffConfig.lineSpacing));
+  }
+}
+
+// Helper line function
+function svgLine(x1,y1,x2,y2) {
+  const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+  line.setAttribute('x1',x1); line.setAttribute('y1',y1);
+  line.setAttribute('x2',x2); line.setAttribute('y2',y2);
+  line.classList.add('grid-line');
+  return line;
+}
+
+// Add a lane (instrument)
+function addLane(type='snare') {
+  const laneIndex = lanes.length;
+  const yOffset = staffConfig.startY + staffConfig.lineSpacing*2 + laneIndex * 60;
+  const lane = { type, yOffset, notes:[] };
+  lanes.push(lane);
+  drawLane(lane);
+  saveState();
+}
+
+function drawLane(lane) {
+  // Draw label
+  const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+  text.setAttribute('x', staffConfig.startX - 80);
+  text.setAttribute('y', lane.yOffset + 8);
+  text.textContent = lane.type.toUpperCase();
+  svg.appendChild(text);
+  // Draw notes
+  lane.notes.forEach(n => drawNote(n));
+}
+
+function drawNote(note) {
+  const {x, y, lane, type} = note;
+  const noteElement = createNoteSVG(type);
+  noteElement.setAttribute('x', x - 10);
+  noteElement.setAttribute('y', y - 10);
+  noteElement.setAttribute('class', 'note');
+  noteElement.setAttribute('data-id', note.id);
+  noteElement.setAttribute('draggable', 'true');
+  noteElement.addEventListener('dragstart', e => {
+    e.dataTransfer.setData('text/plain', note.id);
+    note.element = noteElement;
+    noteElement.classList.add('dragging');
+  });
+  noteElement.addEventListener('dragend', e => {
+    note.element = null;
+    noteElement.classList.remove('dragging');
+  });
+  svg.appendChild(noteElement);
+}
+
+// Create SVG path for a notehead (more realistic)
+function createNoteSVG(type='snare') {
+  const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+  // Simple ellipse shape for notehead, can replace with more detailed path
+  path.setAttribute('d', 'M0,0 a10,8 0 1,0 20,0 a10,8 0 1,0 -20,0');
+  path.setAttribute('fill','#000');
+  return path;
+}
+
+// Generate unique ID
+function generateId() {
+  return 'n' + Math.random().toString(36).substr(2,9);
+}
+
+// Add note to a lane
+function addNoteToLane(lane, measureIndex, step) {
+  const x = staffConfig.startX + measureIndex * staffConfig.measureWidth + step * staffConfig.stepWidth + 10;
+  const y = lane.yOffset;
+  const id = generateId();
+  const note = { id, x, y, lane, type: lane.type, measureIndex, step };
+  notes.push(note);
+  lane.notes.push(note);
+  drawNote(note);
+}
+
+// Toggle grid overlay
+const gridButton = document.getElementById('grid-toggle');
+gridButton.onclick = () => {
+  showGrid = !showGrid;
+  document.querySelectorAll('.grid-line').forEach(l => l.style.display = showGrid ? 'block' : 'none');
+};
+
+// Add lane buttons
+document.getElementById('addSnare').onclick = () => { addLane('snare'); saveState(); };
+document.getElementById('addKick').onclick = () => { addLane('kick'); saveState(); };
+document.getElementById('clear').onclick = () => { clearNotes(); saveState(); };
+document.getElementById('undoBtn').onclick = () => { undo(); };
+
+// Clear all notes
+function clearNotes() {
+  notes.forEach(n => n.element && n.element.remove());
+  notes.length=0;
+  lanes.forEach(l => l.notes.length=0);
+}
+
+// Save state for undo
+function saveState() {
+  history.push({ notes: [...notes], lanes: JSON.parse(JSON.stringify(lanes)) });
+}
+
+// Undo last change
+function undo() {
+  if(history.length ===0) return;
+  const prev = history.pop();
+  // Remove all current notes
+  notes.forEach(n => n.element && n.element.remove());
+  notes.length=0;
+  lanes.length=0;
+  // Recreate lanes and notes
+  prev.lanes.forEach(l => addLane(l.type));
+  prev.notes.forEach(n => {
+    const lane = lanes.find(l=>l.type===n.type);
+    if(lane) {
+      addNoteToLane(lane, n.measureIndex, n.step);
+    }
+  });
+}
+
+// Drag and Drop notes
+svg.addEventListener('dragover', e => e.preventDefault());
+svg.addEventListener('drop', e => {
+  e.preventDefault();
+  const noteId = e.dataTransfer.getData('text/plain');
+  const note = notes.find(n => n.id===noteId);
+  if(note) {
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
+    note.x = svgP.x;
+    note.y = svgP.y;
+    note.element.setAttribute('x', note.x - 10);
+    note.element.setAttribute('y', note.y - 10);
+    // Optionally, update measure/step based on position
+  }
+});
+
+// Play sound
+function playNoteForLane(laneType) {
+  if(laneType==='snare') {
+    const buffer = samples.snare;
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtx.destination);
+    source.start();
+  } else if(laneType==='kick') {
+    const buffer = samples.kick;
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtx.destination);
+    source.start();
+  }
+}
+
+// Play all notes
+function playPattern() {
+  notes.forEach(n => {
+    if(n) {
+      setTimeout(() => {
+        playNoteForLane(n.type);
+      }, Math.random()*100); // Random delay for realism
+    }
+  });
+}
+
+// Initialize
+drawStaff();
+addLane('snare');
+addLane('kick');
+
+</script>
+</body>
+</html>
