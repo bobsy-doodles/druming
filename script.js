@@ -457,8 +457,7 @@ const DSP = (function () {
 })();
 if (typeof module !== 'undefined') module.exports = DSP;
 
-</script>
-<script>
+
 (function () {
   'use strict';
   const $ = s => document.querySelector(s);
